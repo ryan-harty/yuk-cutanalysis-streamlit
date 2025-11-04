@@ -5,9 +5,13 @@ from typing import Dict, List
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Yuk Cut Analysis", page_icon="🧱", layout="wide")
+st.set_page_config(page_title="Yuk Cut Analysis", page_icon="./yuk_logo.png", layout="wide")
 
-st.title("🧱 Let's Analyze Some Cuts!")
+col_logo, col_title = st.columns([1, 10])
+with col_logo:
+    st.image("./yuk_logo.png", width=48)
+with col_title:
+    st.title("Let's Analyze Some Cuts!")
 st.caption(
     "Add cuts to the dataset one row at a time using the dropdowns below.\n"
     "You can insert rows at a specific index if you missed a cut, \
@@ -57,6 +61,22 @@ def init_empty_df(schema: Dict[str, List[str]]):
     # Create an empty dataframe with the schema's columns
     return pd.DataFrame(columns=list(schema.keys()))
     # return pd.DataFrame(list(schema.keys()))
+
+
+def validate_clear_consistency(row: dict) -> (bool, str):
+    """Ensure that if Result != 'Clear' then 'Good Clear?' == 'N/A'.
+
+    Returns (ok, message). Message is empty when ok is True.
+    """
+    try:
+        result = row.get("Result")
+        good_clear = row.get("Good Clear?")
+    except Exception:
+        return False, "Invalid row data for validation."
+
+    if result != "Clear" and good_clear != "N/A":
+        return False, "Unless the result of the cut was a clear, 'Good Clear?' should be 'N/A'. Please adjust Result or Good Clear and try again."
+    return True, ""
 
 ensure_state()
 
@@ -158,48 +178,63 @@ def add_row_from_selection(at_index: int | None = None):
         row[c] = val
 
     df = st.session_state.data.copy()
-    if len(df) == 0:
+    # Validation
+    ok, msg = validate_clear_consistency(row)
+    if not ok:
+        st.error(msg)
+        return False
 
+    # Case A: empty dataset -> first row
+    if len(df) == 0:
         if row["Result"] in ["Goal", "Block", "Drop", "Throwaway", "Reception"]:
             throw_id = 1
         else:
             throw_id = 0
-
-        index_inputs = {"Point ID": 1, "Poss ID": 1, 
-                        "Cut ID": 1, "Throw ID": throw_id}
-
+        index_inputs = {"Point ID": 1, "Poss ID": 1, "Cut ID": 1, "Throw ID": throw_id}
         row.update(index_inputs)
-
         df.loc[len(df)] = row
+        st.session_state.data = df
+        return True
 
-    elif at_index is None and len(df) != 0:
-
+    # Case B: append to end
+    if at_index is None and len(df) != 0:
         index_inputs = set_index_inputs(row, df)
         row.update(index_inputs)
         df.loc[len(df)] = row
-    else:
-        top = df.iloc[:at_index].copy()
-        bottom = df.iloc[at_index:].copy()
+        st.session_state.data = df
+        return True
 
-        # Compute index values for the new row based on the top (previous rows)
-        index_inputs = set_index_inputs(row, top)
-        row.update(index_inputs)
-        new_row_df = pd.DataFrame([row], columns=df.columns)
+    # Case C: insert at position
+    top = df.iloc[:at_index].copy()
+    bottom = df.iloc[at_index:].copy()
 
-        # Recompute index columns for all rows that were below the insertion point
-        # using the new row as the previous row for the bottom slice.
-        adjusted_bottom = adjust_below_rows(new_row_df.iloc[0], bottom.copy())
+    # Compute index values for the new row based on the top (previous rows)
+    index_inputs = set_index_inputs(row, top)
+    row.update(index_inputs)
+    new_row_df = pd.DataFrame([row], columns=df.columns)
 
-        df = pd.concat([top, new_row_df, adjusted_bottom], ignore_index=True)
+    # Recompute index columns for all rows that were below the insertion point
+    # using the new row as the previous row for the bottom slice.
+    adjusted_bottom = adjust_below_rows(new_row_df.iloc[0], bottom.copy())
 
+    df = pd.concat([top, new_row_df, adjusted_bottom], ignore_index=True)
     st.session_state.data = df
+    return True
 
 def set_index_inputs(row, df):
     # df may be a DataFrame (slice of previous rows) or a Series representing the previous row.
+    # If df is a Series, it's already the previous row.
     if isinstance(df, pd.Series):
         prev_row = df
     else:
-        # assume DataFrame-like
+        # assume DataFrame-like. If it's empty (e.g., inserting at index 0), return initial indices.
+        if len(df) == 0:
+            # First row defaults
+            if row["Result"] in ["Goal", "Block", "Drop", "Throwaway", "Reception"]:
+                throw_id = 1
+            else:
+                throw_id = 0
+            return {"Point ID": 1, "Poss ID": 1, "Cut ID": 1, "Throw ID": throw_id}
         prev_row = df.iloc[len(df) - 1]
 
     # row may be a Series, dict, or similar mapping. Access with [] works for all.
@@ -282,6 +317,12 @@ def update_row(idx: int):
         if c in index_cols:
             continue
         df.at[idx, c] = st.session_state.get(f"edit_{c}", df.at[idx, c])
+
+    # Validation on update
+    ok, msg = validate_clear_consistency(df.iloc[idx].to_dict())
+    if not ok:
+        st.error(msg)
+        return False
     # Recompute index columns for the edited row based on the previous row (if any)
     if idx == 0:
         # First row: set initial indices
@@ -420,8 +461,9 @@ for i, (col_name, options) in enumerate(filtered_schema.items()):
 c1, c2 = st.columns([1, 2])
 with c1:
     if st.button("Add row to end", type="primary", use_container_width=True):
-        add_row_from_selection(None)
-        st.success("Row added to end.")
+        ok = add_row_from_selection(None)
+        if ok:
+            st.success("Row added to end.")
 with c2:
     insert_at = st.number_input(
         "Insert at row index",
@@ -432,8 +474,9 @@ with c2:
         help="Choose the index to insert at (0 inserts at top).",
     )
     if st.button("Insert row at position", use_container_width=True):
-        add_row_from_selection(int(insert_at))
-        st.success(f"Row inserted at index {int(insert_at)}.")
+        ok = add_row_from_selection(int(insert_at))
+        if ok:
+            st.success(f"Row inserted at index {int(insert_at)}.")
 
 st.divider()
 
@@ -514,8 +557,9 @@ else:
         b1, b2, b3, b4 = st.columns(4)
         with b1:
             if st.button("Save changes", type="primary", use_container_width=True):
-                update_row(int(idx))
-                st.success(f"Row {int(idx)} updated.")
+                ok = update_row(int(idx))
+                if ok:
+                    st.success(f"Row {int(idx)} updated.")
         with b2:
             if st.button("Delete row", use_container_width=True):
                 delete_row(int(idx))
@@ -530,6 +574,7 @@ else:
 st.divider()
 st.subheader("🛠️ Tips")
 st.markdown(
+    "- User Guide: https://docs.google.com/document/d/1mTi0U4wgNY8C0bQW8KwDzCg8MuUlsK58nsCSsxb-4zU/edit?usp=sharing \n"
     "- Email Harty your CSV (ryan.harty24@gmail.com) or send over Slack when you are done!\n"
     "- **Insert row at position** lets you add a row between existing ones.\n"
     "- Use **Move up/Move down** to reorder.\n"
